@@ -1,151 +1,107 @@
-import os
-import sqlite3
+import os, sqlite3
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+BOT_TOKEN=os.getenv("BOT_TOKEN","")
+ADMIN_ID=int(os.getenv("ADMIN_ID","0"))
+CHANNELS=[("bypassVault","https://t.me/bypassVault"),("primeloote","https://t.me/primeloote"),("sheinstockprime","https://t.me/sheinstockprime")]
+IST=timezone(timedelta(hours=5,minutes=30))
+RESULT_TIME=datetime(2026,9,12,10,0,tzinfo=IST)
+DB="giveaway.db"
 
-CHANNELS = [
-    ("bypassVault", "https://t.me/bypassVault"),
-    ("primeloote", "https://t.me/primeloote"),
-    ("sheinstockprime", "https://t.me/sheinstockprime"),
-]
+def conn():
+ c=sqlite3.connect(DB)
+ c.execute("CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,entered INTEGER DEFAULT 0,referred_by INTEGER,referrals INTEGER DEFAULT 0,created_at TEXT)")
+ c.execute("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)")
+ c.commit(); return c
 
-RESULT_TIME = datetime(2026, 9, 12, 10, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
-DB = "giveaway.db"
+def upsert(u):
+ c=conn(); c.execute("INSERT INTO users VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username,first_name=excluded.first_name",(u.id,u.username,u.first_name or "User",0,None,0,datetime.now(IST).isoformat())); c.commit(); c.close()
 
-def db():
-    c = sqlite3.connect(DB)
-    c.execute("""CREATE TABLE IF NOT EXISTS users(
-        user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
-        entered INTEGER DEFAULT 0, referred_by INTEGER, referrals INTEGER DEFAULT 0,
-        created_at TEXT)""")
-    c.commit()
-    return c
+async def joined(bot,uid):
+ for ch,_ in CHANNELS:
+  try:
+   m=await bot.get_chat_member("@"+ch,uid)
+   if m.status in ("left","kicked"): return False
+  except Exception: return False
+ return True
 
-def upsert_user(u):
-    c=db()
-    c.execute("""INSERT INTO users(user_id,username,first_name,created_at)
-                 VALUES(?,?,?,?)
-                 ON CONFLICT(user_id) DO UPDATE SET username=excluded.username,
-                 first_name=excluded.first_name""",
-              (u.id,u.username,u.first_name,datetime.now(timezone.utc).isoformat()))
-    c.commit(); c.close()
+def joins():
+ r=[[InlineKeyboardButton("📢 Join @"+c,url=u)] for c,u in CHANNELS]
+ r.append([InlineKeyboardButton("✅ Verify Join",callback_data="verify")])
+ return InlineKeyboardMarkup(r)
 
-def set_referrer(uid, ref):
-    if not ref or uid == ref: return
-    c=db()
-    row=c.execute("SELECT referred_by FROM users WHERE user_id=?", (uid,)).fetchone()
-    if row and row[0] is None:
-        exists=c.execute("SELECT user_id FROM users WHERE user_id=?", (ref,)).fetchone()
-        if exists:
-            c.execute("UPDATE users SET referred_by=? WHERE user_id=?", (ref,uid))
-            c.execute("UPDATE users SET referrals=referrals+1 WHERE user_id=?", (ref,))
-            c.commit()
-    c.close()
+def menu():
+ return InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Enter Giveaway",callback_data="enter")],[InlineKeyboardButton("👥 My Referrals",callback_data="refs"),InlineKeyboardButton("🏆 Leaderboard",callback_data="leader")]])
 
-async def joined_all(bot, user_id):
-    for channel, _ in CHANNELS:
-        try:
-            m = await bot.get_chat_member("@" + channel, user_id)
-            if m.status in ("left", "kicked"):
-                return False
-        except Exception:
-            return False
-    return True
+async def start(update,context):
+ u=update.effective_user; upsert(u)
+ if context.args:
+  try:
+   ref=int(context.args[0]); c=conn()
+   row=c.execute("SELECT referred_by FROM users WHERE user_id=?",(u.id,)).fetchone()
+   if ref!=u.id and row and row[0] is None and c.execute("SELECT 1 FROM users WHERE user_id=?",(ref,)).fetchone():
+    c.execute("UPDATE users SET referred_by=? WHERE user_id=?",(ref,u.id)); c.execute("UPDATE users SET referrals=referrals+1 WHERE user_id=?",(ref,))
+   c.commit(); c.close()
+  except: pass
+ await update.message.reply_text("🎉 *₹150 GIVEAWAY* 🎉\n\n🥇 1st Prize — ₹100\n🥈 2nd Prize — ₹50\n\nPehle teeno channels join karke Verify Join karein.",parse_mode="Markdown",reply_markup=joins())
 
-def join_keyboard():
-    rows=[[InlineKeyboardButton(f"📢 Join @{ch}", url=url)] for ch,url in CHANNELS]
-    rows.append([InlineKeyboardButton("✅ Verify Join", callback_data="verify")])
-    return InlineKeyboardMarkup(rows)
+async def verify(update,context):
+ q=update.callback_query; await q.answer()
+ if await joined(context.bot,q.from_user.id):
+  await q.edit_message_text("✅ *Join Verified!*\n\nAb Giveaway me entry karein 👇",parse_mode="Markdown",reply_markup=menu())
+ else: await q.answer("❌ Pehle teeno channels join karein.",show_alert=True)
 
-def main_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎁 Enter Giveaway", callback_data="enter")],
-        [InlineKeyboardButton("👥 My Referrals", callback_data="refs"),
-         InlineKeyboardButton("🏆 Leaderboard", callback_data="leader")],
-    ])
+async def enter(update,context):
+ q=update.callback_query; await q.answer()
+ if datetime.now(IST)>=RESULT_TIME:
+  await q.edit_message_text("⛔ Giveaway khatam ho chuka hai."); return
+ if not await joined(context.bot,q.from_user.id):
+  await q.edit_message_text("❌ Pehle teeno channels join karein.",reply_markup=joins()); return
+ c=conn(); c.execute("UPDATE users SET entered=1 WHERE user_id=?",(q.from_user.id,)); c.commit(); c.close()
+ me=await context.bot.get_me(); link=f"https://t.me/{me.username}?start={q.from_user.id}"
+ await q.edit_message_text(f"🎉 *Entry Successful!*\n\n🔗 Referral Link:\n`{link}`\n\n🏆 Result: 12 September, 10:00 AM. Top 2 valid referral winners honge.",parse_mode="Markdown",reply_markup=menu())
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u=update.effective_user; upsert_user(u)
-    ref=None
-    if context.args:
-        try: ref=int(context.args[0])
-        except: pass
-    set_referrer(u.id, ref)
-    await update.message.reply_text(
-        "🎉 *₹150 GIVEAWAY* 🎉\n\n"
-        "🥇 1st Prize — ₹100\n🥈 2nd Prize — ₹50\n\n"
-        "📢 Pehle teeno channels join karein aur Verify Join dabayein.",
-        parse_mode="Markdown", reply_markup=join_keyboard())
+async def refs(update,context):
+ q=update.callback_query; await q.answer(); c=conn(); r=c.execute("SELECT referrals FROM users WHERE user_id=?",(q.from_user.id,)).fetchone(); c.close()
+ await q.edit_message_text(f"👥 *Your Referrals:* {r[0] if r else 0}",parse_mode="Markdown",reply_markup=menu())
 
-async def verify(update, context):
-    q=update.callback_query; await q.answer()
-    if await joined_all(context.bot, q.from_user.id):
-        await q.edit_message_text("✅ *Join verified!*\n\nAb Giveaway me entry karein 👇",
-                                  parse_mode="Markdown", reply_markup=main_keyboard())
-    else:
-        await q.answer("❌ Aapne abhi teeno channels join nahi kiye.", show_alert=True)
+async def leader(update,context):
+ q=update.callback_query; await q.answer(); c=conn(); rows=c.execute("SELECT first_name,username,referrals FROM users WHERE entered=1 ORDER BY referrals DESC,created_at ASC LIMIT 10").fetchall(); c.close()
+ text="🏆 *Leaderboard*\n\n"+("\n".join(f"{i}. @{x[1] or x[0]} — {x[2]} referrals" for i,x in enumerate(rows,1)) if rows else "Abhi koi participant nahi hai.")
+ await q.edit_message_text(text,parse_mode="Markdown",reply_markup=menu())
 
-async def enter(update, context):
-    q=update.callback_query; await q.answer()
-    if not await joined_all(context.bot,q.from_user.id):
-        await q.edit_message_text("❌ Pehle teeno compulsory channels join karein.",
-                                  reply_markup=join_keyboard()); return
-    c=db()
-    c.execute("UPDATE users SET entered=1 WHERE user_id=?", (q.from_user.id,))
-    c.commit(); c.close()
-    await q.edit_message_text(
-        "🎉 *Entry Successful!*\n\n"
-        "Ab apna referral link share karke valid referrals badhayein:\n"
-        f"`https://t.me/{(await context.bot.get_me()).username}?start={q.from_user.id}`\n\n"
-        "🏆 Sabse zyada valid referrals wale 2 members winners honge.",
-        parse_mode="Markdown", reply_markup=main_keyboard())
-
-async def refs(update, context):
-    q=update.callback_query; await q.answer()
-    c=db(); r=c.execute("SELECT referrals,entered FROM users WHERE user_id=?", (q.from_user.id,)).fetchone(); c.close()
-    count=r[0] if r else 0
-    await q.edit_message_text(f"👥 *Your valid referrals:* {count}\n\nKeep sharing your referral link!",
-                              parse_mode="Markdown", reply_markup=main_keyboard())
-
-async def leader(update, context):
-    q=update.callback_query; await q.answer()
-    c=db(); rows=c.execute("""SELECT first_name,username,referrals FROM users
-                              WHERE entered=1 ORDER BY referrals DESC LIMIT 10""").fetchall(); c.close()
-    if not rows: text="🏆 Leaderboard abhi empty hai."
-    else:
-        text="🏆 *Top Giveaway Members*\n\n"
-        for i,(name,username,r) in enumerate(rows,1):
-            display=("@" + username) if username else name
-            text += f"{i}. {display} — {r} referrals\n"
-    await q.edit_message_text(text,parse_mode="Markdown",reply_markup=main_keyboard())
-
-async def admin(update, context):
-    if update.effective_user.id != ADMIN_ID: return
-    c=db()
-    rows=c.execute("""SELECT user_id,first_name,username,referrals FROM users
-                      WHERE entered=1 ORDER BY referrals DESC""").fetchall()
-    c.close()
-    text="🏆 *Final Ranking*\n\n"
-    for i,(uid,name,username,r) in enumerate(rows[:20],1):
-        text += f"{i}. {name} (@{username or '-'}) — {r}\n"
-    await update.message.reply_text(text,parse_mode="Markdown")
+async def result_job(context):
+ if datetime.now(IST)<RESULT_TIME: return
+ c=conn()
+ if c.execute("SELECT 1 FROM settings WHERE key='results_sent'").fetchone(): c.close(); return
+ rows=c.execute("SELECT user_id,first_name,username,referrals FROM users WHERE entered=1 ORDER BY referrals DESC,created_at ASC").fetchall()
+ winners=[]
+ for x in rows:
+  if await joined(context.bot,x[0]):
+   winners.append(x)
+   if len(winners)==2: break
+ c.execute("INSERT OR REPLACE INTO settings VALUES('results_sent','1')"); c.commit(); c.close()
+ if len(winners)<2:
+  if ADMIN_ID: await context.bot.send_message(ADMIN_ID,"⚠️ 2 eligible winners nahi mile.")
+  return
+ a,b=winners
+ msg=f"🎉 *GIVEAWAY RESULT DECLARED* 🎉\n\n🥇 *1st Winner — ₹100*\n{a[1]} — {a[3]} valid referrals\n\n🥈 *2nd Winner — ₹50*\n{b[1]} — {b[3]} valid referrals\n\nCongratulations! 🎊"
+ if ADMIN_ID: await context.bot.send_message(ADMIN_ID,msg,parse_mode="Markdown")
+ for x in winners:
+  try: await context.bot.send_message(x[0],"🎉 Congratulations!\n\n"+msg,parse_mode="Markdown")
+  except: pass
 
 def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN environment variable is missing")
-    app=Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",start))
-    app.add_handler(CommandHandler("admin",admin))
-    app.add_handler(CallbackQueryHandler(verify,pattern="^verify$"))
-    app.add_handler(CallbackQueryHandler(enter,pattern="^enter$"))
-    app.add_handler(CallbackQueryHandler(refs,pattern="^refs$"))
-    app.add_handler(CallbackQueryHandler(leader,pattern="^leader$"))
-    print("Giveaway bot running...")
-    app.run_polling()
-
-if __name__=="__main__":
-    main()
+ if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN missing")
+ app=Application.builder().token(BOT_TOKEN).build()
+ app.add_handler(CommandHandler("start",start))
+ app.add_handler(CallbackQueryHandler(verify,pattern="^verify$"))
+ app.add_handler(CallbackQueryHandler(enter,pattern="^enter$"))
+ app.add_handler(CallbackQueryHandler(refs,pattern="^refs$"))
+ app.add_handler(CallbackQueryHandler(leader,pattern="^leader$"))
+ app.job_queue.run_repeating(result_job,interval=60,first=5)
+ print("Bot running...")
+ app.run_polling()
+if __name__=="__main__": main()
